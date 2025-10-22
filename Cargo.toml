@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+futures = "0.3.31"
+futures-util = "0.3.31"
+tokio = {version = "1.48.0" , features = ["full"] }
+tokio-sync = "0.1.8"
+tokio-tungstenite = "0.28.0"

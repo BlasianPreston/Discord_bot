@@ -1,5 +1,4 @@
 use reqwests::{Client, header};
-use anyhow
 
 pub struct DiscordHTTPS {
     client: Client,
