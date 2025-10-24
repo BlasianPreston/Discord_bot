@@ -1,11 +1,14 @@
-use reqwests::{Client, header};
-use futures_util::{StreamExt, SinkExt};
+use dotenv::dotenv;
+use futures_util::{SinkExt, StreamExt};
+use reqwest::{Client, Url, header};
 use serde_json::Value;
-use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
 use std::env;
+use tokio::sync::mpsc;
+use tokio::time::Duration;
+use std::sync::{Arc, Mutex} 
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-/* 
+/*
     {
   "op": 0, 	integer	Gateway opcode, which indicates the payload type
   "d": {}, ?mixed (any JSON value)	Event data
@@ -14,75 +17,25 @@ use std::env;
     }
 */
 
-pub struct GatewayConnection {
-    tx_outbound: mpsc::Sender<String>,
-    rx_inbound: mpsc::Receiver<String>,
-    sender_task: tokio::task::JoinHandle<()>,
-    receiver_task: tokio::task::JoinHandle<()>
-}
-
-impl GatewayConnection {
-    pub async fn connect() -> anyhow::Result<Self> {
-        // Connect to the Discord gateway
-        let url = Url::parse("wss://gateway.discord.gg/?v=10&encoding=json")?;
-        let (ws_stream, _) = connect_async(url).await?;
-        println!("Connected to Discord gateway!");
-
-        let (mut write, mut read) = ws_stream.split();
-
-        // Create communication channels
-        let (tx_outbound, mut rx_outbound) = mpsc::channel::<String>(32);
-        let (tx_inbound, rx_inbound) = mpsc::channel::<String>(32);
-
-        let sender_task = tokio::spawn(async move {
-            while let Some(msg) = rx_outbound.recv().await {
-                if let Err(e) = write.send(Message::Text(msg)).await {
-                    eprintln!("Error sending message: {e}");
-                    break;
-                }
-            }
-            println!("Sender task ended.");
-        });
-
-        let receiver_task = tokio::spawn(async move {
-            while let Some(Ok(msg)) = read.next().await {
-                if let Message::Text(text) = msg {
-                    if let Err(e) = tx_inbound.send(text).await {
-                        eprintln!("Error forwarding inbound message: {e}");
-                        break;
-                    }
-                }
-            }
-            println!("Receiver task ended.");
-        });
-
-        println!("Gateway connection established!");
-
-        Ok(Self {
-            tx_outbound,
-            rx_inbound,
-            sender_task,
-            receiver_task,
-        })
-    }
-    pub async fn send(&self, msg: String) -> anyhow::Result<()> {
-        self.tx_outbound.send(msg).await?;
-        Ok(())
-    }
-
-    pub async fn recv(&mut self) -> Option<String> {
-        self.rx_inbound.recv().await
-    }
-}
-
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let url = "wss://gateway.discord.gg/?v=10&encoding=json";
+    let (ws_stream, _) = connect_async(url).await?;
+    let ws_stream = Arc::new(Mutex::new(ws_stream)); // Finish cloning ws_stream
+    let ws_clone_for_read = Arc::clone(&ws_stream);
+    let ws_clone_for_heartbeat = Arc::clone(&ws_stream);
+    let ws_clone_for_sender = Arc::clone(&ws_stream);
+    println!("Connected to Discord gateway!");
+
+    let (mut write, mut read) = ws_stream.split();
+
+    // Create communication channels
+    let (tx_outbound, rx_outbound) = mpsc::channel::<String>(32);
+    let (tx_inbound, rx_inbound) = mpsc::channel::<String>(32);
+    let (interval_tx, mut interval_rx) = tokio::sync::mpsc::channel::<u64>(1);
+
     dotenv().ok();
-    let token = env::var("DISCORD_TOKEN");
-
-    let mut gateway = GatewayConnection::connect().await?;
-
+    let token = env::var("DISCORD_TOKEN")?;
     let identify = serde_json::json!({
         "op": 2,
         "d": {
@@ -92,11 +45,73 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    gateway.send(identify.to_string()).await?;
+    tokio::spawn(async move {
+        while let Some(msg) = read.next().await {
+            if let Ok(Message::Text(text)) = msg {
+                let json: Value = serde_json::from_str(&text).unwrap();
+                if json["op"] == 10 {
+                    let interval = json["d"]["heartbeat_interval"].as_u64().unwrap();
+                    interval_tx.send(interval).await.unwrap();
+                }
+            }
+        }
+    });
 
-    // Example: listen for gateway messages
-    while let Some(msg) = gateway.recv().await {
-        println!("Got message: {}", msg);
+    let interval = interval_rx.recv().await.unwrap();
+    println!("Received heartbeat interval: {} ms", interval);
+    write.send(Message::Text(identify.to_string().into()));
+
+    let write_clone = write.clone();
+    let mut inteval_task = tokio::spawn(async move {
+        loop {
+            inteval_task
+                .send(Message::Text(
+                    serde_json::json!({ "op": 1, "d": null }).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(interval)).await;
+        }
+    });
+
+    let sender_task = tokio::spawn(async move {
+        while let Some(msg) = rx_outbound.recv().await {
+            if let Err(e) = write.send(Message::Text(msg.into())).await {
+                eprintln!("Error sending message: {e}");
+                break;
+            }
+        }
+        println!("Sender task ended.");
+    });
+
+    let receiver_task = tokio::spawn(async move {
+        while let Some(Ok(msg)) = read.next().await {
+            if let Message::Text(text) = msg {
+                if let Err(e) = tx_inbound.send(text.to_string()).await {
+                    eprintln!("Error forwarding inbound message: {e}");
+                    break;
+                }
+            }
+        }
+        println!("Receiver task ended.");
+    });
+
+    println!("Gateway connection established!");
+
+    while let Some(msg) = rx_inbound.recv().await {
+        let mut interval = 0;
+        if let Ok(json) = serde_json::from_str::<Value>(&msg) {
+            if interval != 0 {
+            } else if json["op"] == 10 {
+                interval = json["d"]["heartbeat_interval"]
+                    .as_u64()
+                    .expect("missing heartbeat_interval");
+                println!("Got heartbeat interval: {} ms", interval);
+                break;
+            }
+        } else {
+            eprintln!("Failed to parse message: {}", msg);
+        }
     }
 
     Ok(())
