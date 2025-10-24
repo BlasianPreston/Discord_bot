@@ -5,7 +5,6 @@ use serde_json::Value;
 use std::env;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
-use std::sync::{Arc, Mutex} 
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 /*
@@ -21,16 +20,12 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 async fn main() -> anyhow::Result<()> {
     let url = "wss://gateway.discord.gg/?v=10&encoding=json";
     let (ws_stream, _) = connect_async(url).await?;
-    let ws_stream = Arc::new(Mutex::new(ws_stream)); // Finish cloning ws_stream
-    let ws_clone_for_read = Arc::clone(&ws_stream);
-    let ws_clone_for_heartbeat = Arc::clone(&ws_stream);
-    let ws_clone_for_sender = Arc::clone(&ws_stream);
     println!("Connected to Discord gateway!");
 
     let (mut write, mut read) = ws_stream.split();
 
     // Create communication channels
-    let (tx_outbound, rx_outbound) = mpsc::channel::<String>(32);
+    let (tx_outbound, rx_outbound) = mpsc::channel::<String>(32); // Do more research on having multiple tasks running
     let (tx_inbound, rx_inbound) = mpsc::channel::<String>(32);
     let (interval_tx, mut interval_rx) = tokio::sync::mpsc::channel::<u64>(1);
 
@@ -60,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let interval = interval_rx.recv().await.unwrap();
     println!("Received heartbeat interval: {} ms", interval);
     write.send(Message::Text(identify.to_string().into()));
+
 
     let write_clone = write.clone();
     let mut inteval_task = tokio::spawn(async move {
