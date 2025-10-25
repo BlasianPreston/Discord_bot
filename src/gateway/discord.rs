@@ -2,6 +2,7 @@ use anyhow::Result;
 use dotenv::dotenv;
 use futures_util::{SinkExt, stream::StreamExt};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::{env, time::Duration};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -18,6 +19,11 @@ async fn gateway() -> Result<()> {
 
     // Anything we want to handle ourselves and then send back to discord, send through tx_inbound which is received by rx_inbound
     let (tx_inbound, mut rx_inbound) = mpsc::channel::<Value>(32);
+
+    // Send s value to heartbeat
+    let (seq_tx, seq_rx) = tokio::sync::watch::channel(None::<u64>);
+
+    let mut users_to_channels = HashMap::new();
 
     // Sender task: Reads from rx_outbound and sends messages to the WebSocket
     tokio::spawn(async move {
@@ -67,7 +73,7 @@ async fn gateway() -> Result<()> {
                         "op": 2,
                         "d": {
                             "token": token,
-                            "intents": 513, // GUILDS + GUILD_MESSAGES
+                            "intents": 33281, // GUILDS + GUILD_MESSAGES + MESSAGE_CONTENT
                             "properties": { "$os": "linux", "$browser": "rust-bot", "$device": "rust-bot" }
                         }
                     });
@@ -78,10 +84,12 @@ async fn gateway() -> Result<()> {
 
                     // Spawn the heartbeat task after receiving the interval
                     let tx_heartbeat = tx_outbound_clone.clone();
+                    let seq_val = *seq_rx.borrow();
                     tokio::spawn(async move {
                         loop {
                             tokio::time::sleep(Duration::from_millis(interval_ms)).await;
-                            let heartbeat = serde_json::json!({ "op": 1, "d": null }).to_string();
+                            let heartbeat =
+                                serde_json::json!({ "op": 1, "d": seq_val }).to_string();
                             if tx_heartbeat.send(heartbeat).await.is_err() {
                                 eprintln!("Heartbeat channel closed.");
                                 break;
@@ -96,7 +104,8 @@ async fn gateway() -> Result<()> {
                 }
                 // Opcode 1: Immediate heartbeat
                 Some(1) => {
-                    let heartbeat = serde_json::json!({"op": 1, "d": null}).to_string();
+                    let seq_val = *seq_rx.borrow();
+                    let heartbeat = serde_json::json!({"op": 1, "d": seq_val}).to_string();
                     let tx_heartbeat = tx_outbound_clone.clone();
                     if tx_heartbeat.send(heartbeat).await.is_err() {
                         eprintln!("Failed to send immediate heartbeat");
@@ -138,10 +147,79 @@ async fn gateway() -> Result<()> {
                 }
             };
 
+            let d_content = &json["d"];
             match json["op"].as_u64() {
                 Some(0) => {
-                    let _resume_gateway_url = json["resume_gateway_url"].to_string();
-                    let _session_id = json["session_id"].to_string();
+                    let event_name = json["t"].as_str();
+                    match event_name {
+                        Some("READY") => {
+                            if let Some(s) = json["s"].as_u64() {
+                                let _ = seq_tx.send(Some(s));
+                            }
+                        }
+
+                        Some("VOICE_STATE_UPDATE") => {
+                            let channel_id = d_content["channel_id"].as_u64();
+                            let user_id = d_content["user_id"].as_u64().unwrap_or(0);
+                            match channel_id {
+                                None => {
+                                    users_to_channels.remove(&user_id);
+                                }
+
+                                Some(id) => {
+                                    users_to_channels.insert(user_id, id);
+                                }
+                            }
+                        }
+
+                        Some("MESSAGE_CREATE") => {
+                            let bot_id =
+                                env::var("DISCORD_APP_ID").expect("DISCORD_APP_ID not set");
+                            let content = d_content["content"].as_str().unwrap_or("");
+                            let author_id = d_content["id"].as_str().unwrap_or("");
+                            let channel_id = d_content["channel_id"].as_str().unwrap_or("");
+
+                            // Ignore your own messages
+                            if author_id == bot_id {
+                                return;
+                            }
+
+                            if content.starts_with("!askleo join") {
+                                let join_json = serde_json::json!({
+                                  "op": 4,
+                                  "d": {
+                                    "guild_id": "41771983423143937", // Get rid of hardcoding later
+                                    "channel_id": channel_id,
+                                    "self_mute": false,
+                                    "self_deaf": false
+                                  }
+                                });
+                                if tx_outbound
+                                    .send(Message::Text(join_json.to_string().into()).to_string())
+                                    .await
+                                    .is_err()
+                                {
+                                    println!("Error sending message")
+                                }
+                            }
+
+                            if content.starts_with("!askleo randomleo") {
+                                println!("Random Picture of Leo asked for") // Implement this later
+                            }
+
+                            if content.starts_with("!askleo leave") {
+                                // Implement this later
+                            }
+                        }
+
+                        Some(_) => {
+                            println!("Unhandled event specifier");
+                        }
+
+                        None => {
+                            println!("No event specifier found");
+                        }
+                    }
                 }
                 Some(4) => {
                     // Assume we received a message with channel_id
@@ -156,7 +234,11 @@ async fn gateway() -> Result<()> {
                         "self_deaf": false
                       }
                     });
-                    if tx_outbound.send(Message::Text(join_json.to_string().into()).to_string()).await.is_err() {
+                    if tx_outbound
+                        .send(Message::Text(join_json.to_string().into()).to_string())
+                        .await
+                        .is_err()
+                    {
                         println!("Error sending message")
                     }
                 }

@@ -31,7 +31,7 @@ pub struct Identify {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ImmediateHeartbeat { // Work on heartbeat, need to send d value
-
+    pub d : u64
 }
 
 #[derive(Serialize, Deserialize, Debug)]
