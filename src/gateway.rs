@@ -1,6 +1,6 @@
 use anyhow::Result;
 use dotenv::dotenv;
-use futures_util::{stream::StreamExt, SinkExt};
+use futures_util::{SinkExt, stream::StreamExt};
 use serde_json::Value;
 use std::{env, time::Duration};
 use tokio::sync::mpsc;
@@ -70,7 +70,7 @@ async fn gateway() -> Result<()> {
                             "properties": { "$os": "linux", "$browser": "rust-bot", "$device": "rust-bot" }
                         }
                     });
-                    
+
                     // Send Identify
                     tx_outbound_clone.send(identify.to_string()).await.unwrap();
                     println!("Sent Identify payload.");
@@ -93,9 +93,22 @@ async fn gateway() -> Result<()> {
                 Some(11) => {
                     println!("Received Heartbeat ACK.");
                 }
+                // Opcode 1: Immediate heartbeat
+                Some(1) => {
+                    let heartbeat = serde_json::json!({"op": 1, "d": null}).to_string();
+                    let tx_heartbeat = tx_outbound_clone.clone();
+                    if tx_heartbeat.send(heartbeat).await.is_err() {
+                        eprintln!("Failed to send immediate heartbeat");
+                        break;
+                    }
+                    println!("Send immediate heartbeat")
+                }
                 // Opcode 0: Dispatch (Gateway Event)
                 Some(0) => {
-                    println!("Received Event: {}", json["t"].as_str().unwrap_or("UNKNOWN"));
+                    println!(
+                        "Received Event: {}",
+                        json["t"].as_str().unwrap_or("UNKNOWN")
+                    );
                     // Send the full event payload to the event handler
                     if tx_inbound.send(json).await.is_err() {
                         eprintln!("Inbound event channel closed.");
@@ -116,10 +129,41 @@ async fn gateway() -> Result<()> {
     tokio::spawn(async move {
         while let Some(event) = rx_inbound.recv().await {
             // TODO: Process different events based on `event["t"]`
-            println!(
-                "Event handler received event type: {}",
-                event["t"].as_str().unwrap_or("?")
-            );
+            let json: Value = match serde_json::from_str(&event.to_string()) {
+                Ok(val) => val,
+                Err(e) => {
+                    eprintln!("Error parsing JSON: {e}");
+                    continue;
+                }
+            };
+
+            match json["op"].as_u64() {
+                Some(0) => {
+                    let _resume_gateway_url = json["resume_gateway_url"].to_string();
+                    let _session_id = json["session_id"].to_string();
+                }
+                Some(4) => {
+                    // Assume we received a message with channel_id
+                    dotenv().ok();
+                    let channel_id = "";
+                    let join_json = serde_json::json!({
+                      "op": 4,
+                      "d": {
+                        "guild_id": "41771983423143937", // Get rid of hardcoding later
+                        "channel_id": channel_id,
+                        "self_mute": false,
+                        "self_deaf": false
+                      }
+                    });
+                    write.send(Message::Text(join_json.to_string().into())).await; // Might want to get rid of this task and match on the read variable
+                }
+                Some(op) => {
+                    println!("Unhandled opcode")
+                }
+                None => {
+                    println!("Received none")
+                }
+            }
         }
         println!("Event handler task ended.");
     });
