@@ -13,9 +13,10 @@ async fn gateway() -> Result<()> {
 
     let (mut write, mut read) = ws_stream.split();
 
-    // Channel for sending messages *to* Discord
+    // Send info through tx_outbound and receive it through rx_outbound which sends it to write which sends it to discord
     let (tx_outbound, mut rx_outbound) = mpsc::channel::<String>(32);
-    // Channel for receiving *events from* Discord
+
+    // Anything we want to handle ourselves and then send back to discord, send through tx_inbound which is received by rx_inbound
     let (tx_inbound, mut rx_inbound) = mpsc::channel::<Value>(32);
 
     // Sender task: Reads from rx_outbound and sends messages to the WebSocket
@@ -155,7 +156,9 @@ async fn gateway() -> Result<()> {
                         "self_deaf": false
                       }
                     });
-                    write.send(Message::Text(join_json.to_string().into())).await; // Might want to get rid of this task and match on the read variable
+                    if tx_outbound.send(Message::Text(join_json.to_string().into()).to_string()).await.is_err() {
+                        println!("Error sending message")
+                    }
                 }
                 Some(op) => {
                     println!("Unhandled opcode")
