@@ -174,13 +174,14 @@ async fn gateway() -> Result<()> {
 
                         Some("MESSAGE_CREATE") => {
                             let bot_id =
-                                env::var("DISCORD_APP_ID").expect("DISCORD_APP_ID not set");
+                                env::var("DISCORD_APP_ID").expect("DISCORD_APP_ID not set").parse().unwrap_or(0);
                             let content = d_content["content"].as_str().unwrap_or("");
-                            let author_id = d_content["id"].as_str().unwrap_or("");
+                            let author_id = d_content["id"].as_u64().unwrap_or(0);
                             let channel_id = d_content["channel_id"].as_str().unwrap_or("");
+                            let guild_id = users_to_channels[&author_id].to_string();
 
                             // Ignore your own messages
-                            if author_id == bot_id {
+                            if author_id == (bot_id) {
                                 return;
                             }
 
@@ -188,7 +189,7 @@ async fn gateway() -> Result<()> {
                                 let join_json = serde_json::json!({
                                   "op": 4,
                                   "d": {
-                                    "guild_id": "41771983423143937", // Get rid of hardcoding later
+                                    "guild_id": guild_id, // Get rid of hardcoding later
                                     "channel_id": channel_id,
                                     "self_mute": false,
                                     "self_deaf": false
@@ -199,8 +200,9 @@ async fn gateway() -> Result<()> {
                                     .await
                                     .is_err()
                                 {
-                                    println!("Error sending message")
+                                    println!("Error sending message");
                                 }
+                                println!("Successfully joined voice channel");
                             }
 
                             if content.starts_with("!askleo randomleo") {
@@ -221,28 +223,7 @@ async fn gateway() -> Result<()> {
                         }
                     }
                 }
-                Some(4) => {
-                    // Assume we received a message with channel_id
-                    dotenv().ok();
-                    let channel_id = "";
-                    let join_json = serde_json::json!({
-                      "op": 4,
-                      "d": {
-                        "guild_id": "41771983423143937", // Get rid of hardcoding later
-                        "channel_id": channel_id,
-                        "self_mute": false,
-                        "self_deaf": false
-                      }
-                    });
-                    if tx_outbound
-                        .send(Message::Text(join_json.to_string().into()).to_string())
-                        .await
-                        .is_err()
-                    {
-                        println!("Error sending message")
-                    }
-                }
-                Some(op) => {
+                Some(_) => {
                     println!("Unhandled opcode")
                 }
                 None => {
