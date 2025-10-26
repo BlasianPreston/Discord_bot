@@ -7,7 +7,7 @@ use std::{env, time::Duration};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-async fn gateway() -> Result<()> {
+pub async fn gateway_connect() -> Result<()> {
     let url = "wss://gateway.discord.gg/?v=10&encoding=json";
     let (ws_stream, _) = connect_async(url).await?;
     println!("Connected to Discord gateway!");
@@ -189,7 +189,7 @@ async fn gateway() -> Result<()> {
                                 let join_json = serde_json::json!({
                                   "op": 4,
                                   "d": {
-                                    "guild_id": guild_id, // Get rid of hardcoding later
+                                    "guild_id": guild_id,
                                     "channel_id": channel_id,
                                     "self_mute": false,
                                     "self_deaf": false
