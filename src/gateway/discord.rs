@@ -84,8 +84,10 @@ pub async fn gateway_connect() -> Result<()> {
 
                     // Spawn the heartbeat task after receiving the interval
                     let tx_heartbeat = tx_outbound_clone.clone();
-                    let seq_val = *seq_rx.borrow();
+                    let mut seq_rx_clone = seq_rx.clone();
                     tokio::spawn(async move {
+                        seq_rx_clone.changed().await.unwrap();
+                        let seq_val = *seq_rx_clone.borrow();
                         loop {
                             tokio::time::sleep(Duration::from_millis(interval_ms)).await;
                             let heartbeat =
@@ -176,9 +178,9 @@ pub async fn gateway_connect() -> Result<()> {
                             let bot_id =
                                 env::var("DISCORD_APP_ID").expect("DISCORD_APP_ID not set").parse().unwrap_or(0);
                             let content = d_content["content"].as_str().unwrap_or("");
-                            let author_id = d_content["id"].as_u64().unwrap_or(0);
+                            let author_id = d_content["author"]["id"].as_u64().unwrap_or(0);
                             let channel_id = d_content["channel_id"].as_str().unwrap_or("");
-                            let guild_id = users_to_channels[&author_id].to_string();
+                            let guild_id = d_content["guild_id"].as_str().unwrap_or("");
 
                             // Ignore your own messages
                             if author_id == (bot_id) {
