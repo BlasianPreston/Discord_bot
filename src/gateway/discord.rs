@@ -23,6 +23,9 @@ pub async fn gateway_connect() -> Result<()> {
     // Send s value to heartbeat
     let (seq_tx, seq_rx) = tokio::sync::watch::channel(None::<u64>);
 
+    // Send values to reconnect
+    let (rec_tx, rec_rx) = tokio::sync::watch::channel((None::<String>, None::<String>));
+
     let mut users_to_channels = HashMap::new();
 
     // Sender task: Reads from rx_outbound and sends messages to the WebSocket
@@ -153,11 +156,20 @@ pub async fn gateway_connect() -> Result<()> {
             match json["op"].as_u64() {
                 Some(0) => {
                     let event_name = json["t"].as_str();
+                    if let Some(s) = json["s"].as_u64() {
+                        let _ = seq_tx.send(Some(s));
+                    }
                     match event_name {
                         Some("READY") => {
-                            if let Some(s) = json["s"].as_u64() {
-                                let _ = seq_tx.send(Some(s));
+                            let mut session_id = None;
+                            let mut resume_gateway_url = None;
+                            if let Some(id) = json["session_id"].as_str() {
+                                session_id = Some(id.to_string());
                             }
+                            if let Some(url) = json["resume_gateway_url"].as_str() {
+                                resume_gateway_url = Some(url.to_string());
+                            }
+                            let _ = rec_tx.send((session_id, resume_gateway_url));
                         }
 
                         Some("VOICE_STATE_UPDATE") => {
@@ -175,8 +187,10 @@ pub async fn gateway_connect() -> Result<()> {
                         }
 
                         Some("MESSAGE_CREATE") => {
-                            let bot_id =
-                                env::var("DISCORD_APP_ID").expect("DISCORD_APP_ID not set").parse().unwrap_or(0);
+                            let bot_id = env::var("DISCORD_APP_ID")
+                                .expect("DISCORD_APP_ID not set")
+                                .parse()
+                                .unwrap_or(0);
                             let content = d_content["content"].as_str().unwrap_or("");
                             let author_id = d_content["author"]["id"].as_u64().unwrap_or(0);
                             let channel_id = d_content["channel_id"].as_str().unwrap_or("");
