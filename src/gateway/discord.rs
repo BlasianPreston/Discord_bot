@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::{env, time::Duration};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub async fn gateway_connect() -> Result<()> {
     let url = "wss://gateway.discord.gg/?v=10&encoding=json";
@@ -27,6 +29,9 @@ pub async fn gateway_connect() -> Result<()> {
     let (rec_tx, rec_rx) = tokio::sync::watch::channel((None::<String>, None::<String>));
 
     let mut users_to_channels = HashMap::new();
+
+    dotenv().ok();
+    let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN not set");
 
     // Sender task: Reads from rx_outbound and sends messages to the WebSocket
     tokio::spawn(async move {
@@ -70,8 +75,6 @@ pub async fn gateway_connect() -> Result<()> {
                     println!("Received heartbeat interval: {} ms", interval_ms);
 
                     // Send Identify payload
-                    dotenv().ok();
-                    let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN not set");
                     let identify = serde_json::json!({
                         "op": 2,
                         "d": {
@@ -128,6 +131,47 @@ pub async fn gateway_connect() -> Result<()> {
                     if tx_inbound.send(json).await.is_err() {
                         eprintln!("Inbound event channel closed.");
                         break;
+                    }
+                }
+                Some(7) => {
+                    let (session_id, resume_gateway_url) = rec_rx.borrow().clone();
+                    match (session_id, resume_gateway_url) {
+                        (Some(x), Some(y)) => {
+                            let resume_json = serde_json::json!({
+                               "op": 6,
+                               "d": {
+                                "token": token,
+                                "session_id": x,
+                                "seq": *seq_rx.borrow()
+                               }
+                            });
+                            let (mut new_ws_stream, _) = match connect_async(y).await {
+                                Ok(tuple) => {
+                                    println!("Successfully reconnected to resume URL");
+                                    tuple
+                                }
+                                Err(e) => {
+                                    println!("Error resuming connection: {}", e);
+                                    continue;
+                                }
+                            };
+                            let resume_msg = Message::Text(resume_json.to_string().into());
+                            if let Err(e) = new_ws_stream.send(resume_msg).await {
+                                println!("Error sending resume payload: {}", e);
+                                continue; // Skip and try a fresh connect
+                            }
+
+                            println!("Connection resumed successfully!");
+
+                            // 3. HERE IS THE FIX:
+                            // Split the new stream and re-assign your mutable variables
+                            let (new_write, new_read) = new_ws_stream.split();
+                            write = new_write;
+                            read = new_read;
+                        }
+                        (_, _) => {
+                            println!("No session id or resume gateway url")
+                        }
                     }
                 }
                 // Need to work on other op codes
