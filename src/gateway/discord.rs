@@ -245,15 +245,8 @@ pub async fn gateway_connect() -> Result<()> {
 
     // This task listens for events from the reader
     tokio::spawn(async move {
-        while let Some(event) = rx_inbound.recv().await {
+        while let Some(json) = rx_inbound.recv().await {
             // TODO: Process different events based on `event["t"]`
-            let json: Value = match serde_json::from_str(&event.to_string()) {
-                Ok(val) => val,
-                Err(e) => {
-                    eprintln!("Error parsing JSON: {e}");
-                    continue;
-                }
-            };
 
             let d_content = &json["d"];
             match json["op"].as_u64() {
@@ -314,11 +307,7 @@ pub async fn gateway_connect() -> Result<()> {
                                     "self_deaf": false
                                   }
                                 });
-                                if tx_outbound
-                                    .send(Message::Text(join_json.to_string().into()).to_string())
-                                    .await
-                                    .is_err()
-                                {
+                                if tx_outbound.send(join_json.to_string()).await.is_err() {
                                     println!("Error sending message");
                                 }
                                 println!("Successfully joined voice channel");
