@@ -4,10 +4,9 @@ use futures_util::{SinkExt, stream::StreamExt};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::{env, time::Duration};
+use tokio::select;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 pub async fn gateway_connect() -> Result<()> {
     let url = "wss://gateway.discord.gg/?v=10&encoding=json";
@@ -28,17 +27,97 @@ pub async fn gateway_connect() -> Result<()> {
     // Send values to reconnect
     let (rec_tx, rec_rx) = tokio::sync::watch::channel((None::<String>, None::<String>));
 
+    let (tx_write_update, mut rx_write_update) = mpsc::channel(1);
+    let (tx_read_update, mut rx_read_update) = mpsc::channel(1);
+
     let mut users_to_channels = HashMap::new();
 
     dotenv().ok();
     let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN not set");
 
+    let seq_rx_clone = seq_rx.clone();
+    let rec_rx_clone = rec_rx.clone();
+    let token_clone = token.clone();
+    let tx_write_update_clone = tx_write_update.clone();
+    let tx_read_update_clone = tx_read_update.clone();
     // Sender task: Reads from rx_outbound and sends messages to the WebSocket
     tokio::spawn(async move {
-        while let Some(msg) = rx_outbound.recv().await {
-            if write.send(Message::Text(msg.into())).await.is_err() {
-                eprintln!("Error sending message or WebSocket closed");
-                break;
+        loop {
+            select! {
+                msg = rx_outbound.recv() => {
+                    if let Some(msg) = msg {
+                        let msg_json = serde_json::json!(msg);
+                        match msg_json["op"].as_u64() {
+                            Some(6) => {
+                                let (session_id, resume_gateway_url) = rec_rx_clone.borrow().clone();
+                                match (session_id, resume_gateway_url) {
+                                    (Some(x), Some(y)) => {
+                                        let resume_json = serde_json::json!({
+                                           "op": 6,
+                                           "d": {
+                                            "token": token_clone.clone(),
+                                            "session_id": x,
+                                            "seq": *seq_rx_clone.borrow()
+                                           }
+                                        });
+                                        let (mut new_ws_stream, _) = match connect_async(y).await {
+                                            Ok(tuple) => {
+                                                println!("Successfully reconnected to resume URL");
+                                                tuple
+                                            }
+                                            Err(e) => {
+                                                println!("Error resuming connection: {}", e);
+                                                continue;
+                                            }
+                                        };
+                                        let resume_msg = Message::Text(resume_json.to_string().into());
+                                        if let Err(e) = new_ws_stream.send(resume_msg).await {
+                                            println!("Error sending resume payload: {}", e);
+                                            continue; // Skip and try a fresh connect
+                                        }
+
+                                        println!("Connection resumed successfully!");
+
+                                        // Split the new stream and send halves to both tasks
+                                        let (new_write, new_read) = new_ws_stream.split();
+                                        if tx_write_update_clone.send(new_write).await.is_err() {
+                                            eprintln!("Failed to send new write stream");
+                                            break;
+                                        }
+                                        if tx_read_update_clone.send(new_read).await.is_err() {
+                                            eprintln!("Failed to send new read stream");
+                                            break;
+                                        }
+                                    }
+                                    (_, _) => {
+                                        println!("No session id or resume gateway url")
+                                    }
+                                }
+                            }
+                            Some(_) => {
+                                if write.send(Message::Text(msg.into())).await.is_err() {
+                                    eprintln!("Error sending message or WebSocket closed");
+                                    break;
+                                }
+                            }
+                            None => {
+                                println!("Invalid Json sent to tx_outbound");
+                            }
+                        }
+                    } else {
+                        // Channel closed
+                        break;
+                    }
+                }
+                new_write = rx_write_update.recv() => {
+                    if let Some(w) = new_write {
+                        write = w;
+                        println!("Updated write stream");
+                    } else {
+                        // Channel closed
+                        break;
+                    }
+                }
             }
         }
         println!("Sender task ended.");
@@ -46,139 +125,119 @@ pub async fn gateway_connect() -> Result<()> {
 
     // Reader Task: Reads from the WebSocket and routes messages
     let tx_outbound_clone = tx_outbound.clone();
+    let seq_rx_clone = seq_rx.clone();
+    let token_clone_clone = token.clone();
     tokio::spawn(async move {
-        while let Some(msg) = read.next().await {
-            let msg = match msg {
-                Ok(Message::Text(text)) => text,
-                Ok(_) => {
-                    // Ignore non-text messages
-                    continue;
-                }
-                Err(e) => {
-                    eprintln!("Error reading from WebSocket: {e}");
-                    break;
-                }
-            };
-
-            let json: Value = match serde_json::from_str(&msg) {
-                Ok(val) => val,
-                Err(e) => {
-                    eprintln!("Error parsing JSON: {e}");
-                    continue;
-                }
-            };
-
-            match json["op"].as_u64() {
-                // Opcode 10: Hello
-                Some(10) => {
-                    let interval_ms = json["d"]["heartbeat_interval"].as_u64().unwrap();
-                    println!("Received heartbeat interval: {} ms", interval_ms);
-
-                    // Send Identify payload
-                    let identify = serde_json::json!({
-                        "op": 2,
-                        "d": {
-                            "token": token,
-                            "intents": 33281, // GUILDS + GUILD_MESSAGES + MESSAGE_CONTENT
-                            "properties": { "$os": "linux", "$browser": "rust-bot", "$device": "rust-bot" }
-                        }
-                    });
-
-                    // Send Identify
-                    tx_outbound_clone.send(identify.to_string()).await.unwrap();
-                    println!("Sent Identify payload.");
-
-                    // Spawn the heartbeat task after receiving the interval
-                    let tx_heartbeat = tx_outbound_clone.clone();
-                    let mut seq_rx_clone = seq_rx.clone();
-                    tokio::spawn(async move {
-                        seq_rx_clone.changed().await.unwrap();
-                        let seq_val = *seq_rx_clone.borrow();
-                        loop {
-                            tokio::time::sleep(Duration::from_millis(interval_ms)).await;
-                            let heartbeat =
-                                serde_json::json!({ "op": 1, "d": seq_val }).to_string();
-                            if tx_heartbeat.send(heartbeat).await.is_err() {
-                                eprintln!("Heartbeat channel closed.");
+        loop {
+            select! {
+                msg = read.next() => {
+                    if let Some(msg) = msg {
+                        let msg = match msg {
+                            Ok(Message::Text(text)) => text,
+                            Ok(_) => {
+                                // Ignore non-text messages
+                                continue;
+                            }
+                            Err(e) => {
+                                eprintln!("Error reading from WebSocket: {e}");
                                 break;
                             }
-                            println!("Sent heartbeat.");
-                        }
-                    });
-                }
-                // Opcode 11: Heartbeat ACK
-                Some(11) => {
-                    println!("Received Heartbeat ACK.");
-                }
-                // Opcode 1: Immediate heartbeat
-                Some(1) => {
-                    let seq_val = *seq_rx.borrow();
-                    let heartbeat = serde_json::json!({"op": 1, "d": seq_val}).to_string();
-                    let tx_heartbeat = tx_outbound_clone.clone();
-                    if tx_heartbeat.send(heartbeat).await.is_err() {
-                        eprintln!("Failed to send immediate heartbeat");
-                        break;
-                    }
-                    println!("Send immediate heartbeat")
-                }
-                // Opcode 0: Dispatch (Gateway Event)
-                Some(0) => {
-                    println!(
-                        "Received Event: {}",
-                        json["t"].as_str().unwrap_or("UNKNOWN")
-                    );
-                    // Send the full event payload to the event handler
-                    if tx_inbound.send(json).await.is_err() {
-                        eprintln!("Inbound event channel closed.");
-                        break;
-                    }
-                }
-                Some(7) => {
-                    let (session_id, resume_gateway_url) = rec_rx.borrow().clone();
-                    match (session_id, resume_gateway_url) {
-                        (Some(x), Some(y)) => {
-                            let resume_json = serde_json::json!({
-                               "op": 6,
-                               "d": {
-                                "token": token,
-                                "session_id": x,
-                                "seq": *seq_rx.borrow()
-                               }
-                            });
-                            let (mut new_ws_stream, _) = match connect_async(y).await {
-                                Ok(tuple) => {
-                                    println!("Successfully reconnected to resume URL");
-                                    tuple
-                                }
-                                Err(e) => {
-                                    println!("Error resuming connection: {}", e);
-                                    continue;
-                                }
-                            };
-                            let resume_msg = Message::Text(resume_json.to_string().into());
-                            if let Err(e) = new_ws_stream.send(resume_msg).await {
-                                println!("Error sending resume payload: {}", e);
-                                continue; // Skip and try a fresh connect
+                        };
+
+                        let json: Value = match serde_json::from_str(&msg) {
+                            Ok(val) => val,
+                            Err(e) => {
+                                eprintln!("Error parsing JSON: {e}");
+                                continue;
                             }
+                        };
 
-                            println!("Connection resumed successfully!");
+                        match json["op"].as_u64() {
+                            // Opcode 10: Hello
+                            Some(10) => {
+                                let interval_ms = json["d"]["heartbeat_interval"].as_u64().unwrap();
+                                println!("Received heartbeat interval: {} ms", interval_ms);
 
-                            // 3. HERE IS THE FIX:
-                            // Split the new stream and re-assign your mutable variables
-                            let (new_write, new_read) = new_ws_stream.split();
-                            write = new_write;
-                            read = new_read;
+                                // Send Identify payload
+                                let identify = serde_json::json!({
+                                    "op": 2,
+                                    "d": {
+                                        "token": token_clone_clone.clone(),
+                                        "intents": 33281, // GUILDS + GUILD_MESSAGES + MESSAGE_CONTENT
+                                        "properties": { "$os": "linux", "$browser": "rust-bot", "$device": "rust-bot" }
+                                    }
+                                });
+
+                                // Send Identify
+                                tx_outbound_clone.send(identify.to_string()).await.unwrap();
+                                println!("Sent Identify payload.");
+
+                                // Spawn the heartbeat task after receiving the interval
+                                let tx_heartbeat = tx_outbound_clone.clone();
+                                let mut seq_rx_heartbeat = seq_rx_clone.clone();
+                                tokio::spawn(async move {
+                                    seq_rx_heartbeat.changed().await.unwrap();
+                                    let seq_val = *seq_rx_heartbeat.borrow();
+                                    loop {
+                                        tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                                        let heartbeat =
+                                            serde_json::json!({ "op": 1, "d": seq_val }).to_string();
+                                        if tx_heartbeat.send(heartbeat).await.is_err() {
+                                            eprintln!("Heartbeat channel closed.");
+                                            break;
+                                        }
+                                        println!("Sent heartbeat.");
+                                    }
+                                });
+                            }
+                            // Opcode 11: Heartbeat ACK
+                            Some(11) => {
+                                println!("Received Heartbeat ACK.");
+                            }
+                            // Opcode 1: Immediate heartbeat
+                            Some(1) => {
+                                let seq_val = *seq_rx_clone.borrow();
+                                let heartbeat = serde_json::json!({"op": 1, "d": seq_val}).to_string();
+                                let tx_heartbeat = tx_outbound_clone.clone();
+                                if tx_heartbeat.send(heartbeat).await.is_err() {
+                                    eprintln!("Failed to send immediate heartbeat");
+                                    break;
+                                }
+                                println!("Send immediate heartbeat")
+                            }
+                            // Opcode 0: Dispatch (Gateway Event)
+                            Some(0) => {
+                                println!(
+                                    "Received Event: {}",
+                                    json["t"].as_str().unwrap_or("UNKNOWN")
+                                );
+                                // Send the full event payload to the event handler
+                                if tx_inbound.send(json).await.is_err() {
+                                    eprintln!("Inbound event channel closed.");
+                                    break;
+                                }
+                            }
+                            Some(7) => {}
+                            // Need to work on other op codes
+                            Some(op) => {
+                                println!("Received unhandled opcode: {}", op);
+                            }
+                            None => {}
                         }
-                        (_, _) => {
-                            println!("No session id or resume gateway url")
-                        }
+                    } else {
+                        // Stream ended
+                        break;
                     }
                 }
-                // Need to work on other op codes
-                Some(op) => {
-                    println!("Received unhandled opcode: {}", op);
+                new_read = rx_read_update.recv() => {
+                    if let Some(r) = new_read {
+                        read = r;
+                        println!("Updated read stream");
+                    } else {
+                        // Channel closed
+                        break;
+                    }
                 }
-                None => {}
             }
         }
         println!("Reader task ended.");
