@@ -155,7 +155,7 @@ pub async fn gateway_connect() -> Result<()> {
                         match json["op"].as_u64() {
                             // Opcode 10: Hello
                             Some(10) => {
-                                let interval_ms = json["d"]["heartbeat_interval"].as_u64().unwrap();
+                                let interval_ms = json["d"]["heartbeat_interval"].as_u64().unwrap_or(45000);
                                 println!("Received heartbeat interval: {} ms", interval_ms);
 
                                 // Send Identify payload
@@ -177,8 +177,8 @@ pub async fn gateway_connect() -> Result<()> {
                                 let mut seq_rx_heartbeat = seq_rx_clone.clone();
                                 tokio::spawn(async move {
                                     seq_rx_heartbeat.changed().await.unwrap();
-                                    let seq_val = *seq_rx_heartbeat.borrow();
                                     loop {
+                                        let seq_val = *seq_rx_heartbeat.borrow();
                                         tokio::time::sleep(Duration::from_millis(interval_ms)).await;
                                         let heartbeat =
                                             serde_json::json!({ "op": 1, "d": seq_val }).to_string();
@@ -211,6 +211,9 @@ pub async fn gateway_connect() -> Result<()> {
                                     "Received Event: {}",
                                     json["t"].as_str().unwrap_or("UNKNOWN")
                                 );
+                                if let Some(s) = json["s"].as_u64() {
+                                    let _ = seq_tx.send(Some(s));
+                                }
                                 // Send the full event payload to the event handler
                                 if tx_inbound.send(json).await.is_err() {
                                     eprintln!("Inbound event channel closed.");
@@ -252,9 +255,6 @@ pub async fn gateway_connect() -> Result<()> {
             match json["op"].as_u64() {
                 Some(0) => {
                     let event_name = json["t"].as_str();
-                    if let Some(s) = json["s"].as_u64() {
-                        let _ = seq_tx.send(Some(s));
-                    }
                     match event_name {
                         Some("READY") => {
                             let mut session_id = None;
@@ -294,7 +294,7 @@ pub async fn gateway_connect() -> Result<()> {
 
                             // Ignore your own messages
                             if author_id == (bot_id) {
-                                return;
+                                continue;
                             }
 
                             if content.starts_with("!askleo join") {
