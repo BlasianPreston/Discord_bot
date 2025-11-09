@@ -46,7 +46,7 @@ pub async fn gateway_connect() -> Result<()> {
             select! {
                 msg = rx_outbound.recv() => {
                     if let Some(msg) = msg {
-                        let msg_json = serde_json::json!(msg);
+                        let msg_json: Value = serde_json::from_str(&msg).unwrap_or_default();
                         match msg_json["op"].as_u64() {
                             Some(6) => {
                                 let (session_id, resume_gateway_url) = rec_rx_clone.borrow().clone();
@@ -178,8 +178,8 @@ pub async fn gateway_connect() -> Result<()> {
                                 tokio::spawn(async move {
                                     seq_rx_heartbeat.changed().await.unwrap();
                                     loop {
-                                        let seq_val = *seq_rx_heartbeat.borrow();
                                         tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                                        let seq_val = *seq_rx_heartbeat.borrow();
                                         let heartbeat =
                                             serde_json::json!({ "op": 1, "d": seq_val }).to_string();
                                         if tx_heartbeat.send(heartbeat).await.is_err() {
@@ -203,7 +203,7 @@ pub async fn gateway_connect() -> Result<()> {
                                     eprintln!("Failed to send immediate heartbeat");
                                     break;
                                 }
-                                println!("Send immediate heartbeat")
+                                println!("Send immediate heartbeat");
                             }
                             // Opcode 0: Dispatch (Gateway Event)
                             Some(0) => {
@@ -259,10 +259,10 @@ pub async fn gateway_connect() -> Result<()> {
                         Some("READY") => {
                             let mut session_id = None;
                             let mut resume_gateway_url = None;
-                            if let Some(id) = json["session_id"].as_str() {
+                            if let Some(id) = json["d"]["session_id"].as_str() {
                                 session_id = Some(id.to_string());
                             }
-                            if let Some(url) = json["resume_gateway_url"].as_str() {
+                            if let Some(url) = json["d"]["resume_gateway_url"].as_str() {
                                 resume_gateway_url = Some(url.to_string());
                             }
                             let _ = rec_tx.send((session_id, resume_gateway_url));
@@ -314,7 +314,7 @@ pub async fn gateway_connect() -> Result<()> {
                             }
 
                             if content.starts_with("!askleo randomleo") {
-                                println!("Random Picture of Leo asked for") // Implement this later
+                                println!("Random Picture of Leo asked for"); // Implement this later
                             }
 
                             if content.starts_with("!askleo leave") {
