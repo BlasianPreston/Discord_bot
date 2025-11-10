@@ -1,3 +1,4 @@
+use super::https::DiscordHTTP;
 use anyhow::Result;
 use dotenv::dotenv;
 use futures_util::{SinkExt, stream::StreamExt};
@@ -287,6 +288,7 @@ pub async fn gateway_connect() -> Result<()> {
                                 .expect("DISCORD_APP_ID not set")
                                 .parse()
                                 .unwrap_or(0);
+                            let client = DiscordHTTP::new();
                             let content = d_content["content"].as_str().unwrap_or("");
                             let author_id = d_content["author"]["id"].as_u64().unwrap_or(0);
                             let channel_id = d_content["channel_id"].as_str().unwrap_or("");
@@ -314,7 +316,18 @@ pub async fn gateway_connect() -> Result<()> {
                             }
 
                             if content.starts_with("!askleo randomleo") {
-                                println!("Random Picture of Leo asked for"); // Implement this later
+                                println!("Random Picture of Leo asked for");
+                                let form = match DiscordHTTP::make_image_payload(
+                                    "Here is a picture of Leo",
+                                    "images/leo_slander.jpg",
+                                ) {
+                                    Ok(f) => f,
+                                    Err(e) => {
+                                        eprintln!("Failed to create image payload: {}", e);
+                                        continue;
+                                    }
+                                };
+                                let _ = DiscordHTTP::send_message_form(client, &token, &channel_id, form).await;
                             }
 
                             if content.starts_with("!askleo leave") {
