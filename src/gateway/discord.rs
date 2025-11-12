@@ -252,10 +252,10 @@ pub async fn gateway_connect() -> Result<()> {
         while let Some(json) = rx_inbound.recv().await {
             // TODO: Process different events based on `event["t"]`
 
-            let d_content = &json["d"];
             match json["op"].as_u64() {
                 Some(0) => {
                     let event_name = json["t"].as_str();
+                    let d_content = &json["d"];
                     match event_name {
                         Some("READY") => {
                             let mut session_id = None;
@@ -269,27 +269,35 @@ pub async fn gateway_connect() -> Result<()> {
                             let _ = rec_tx.send((session_id, resume_gateway_url));
                         }
 
-                        Some("VOICE_STATE_UPDATE") => {
-                            let channel_id = d_content["channel_id"].as_u64();
-                            let user_id = d_content["user_id"].as_u64().unwrap_or(0);
-                            match channel_id {
-                                None => {
-                                    users_to_channels.remove(&user_id);
-                                }
-
-                                Some(id) => {
-                                    users_to_channels.insert(user_id, id);
+                        Some("GUILD_CREATE") => {
+                            if let Some(voice_states) = d_content["voice_states"].as_array() {
+                                for voice_state in voice_states {
+                                    let user_id = voice_state["user_id"].as_str().unwrap_or_default().to_string();
+                                    let channel_id = match voice_state["channel_id"].as_str() {
+                                        Some(id) => Some(id.to_string()),
+                                        None => None
+                                    };
+                                    users_to_channels.insert(user_id, channel_id);
                                 }
                             }
+                        }
+
+                        Some("VOICE_STATE_UPDATE") => {
+                            let channel_id = match d_content["channel_id"].as_str() {
+                                Some(id) => Some(id.to_string()),
+                                None => None
+                            };
+                            let user_id = d_content["user_id"].as_str().unwrap_or("").to_string();
+                            users_to_channels.insert(user_id, channel_id);
                         }
 
                         Some("MESSAGE_CREATE") => {
                             let bot_id = env::var("DISCORD_APP_ID")
                                 .expect("DISCORD_APP_ID not set")
                                 .parse()
-                                .unwrap_or(0);
+                                .unwrap_or(0).to_string();
                             let content = d_content["content"].as_str().unwrap_or("");
-                            let author_id = d_content["author"]["id"].as_u64().unwrap_or(0);
+                            let author_id = d_content["author"]["id"].as_str().unwrap_or("").to_string();
                             let channel_id = d_content["channel_id"].as_str().unwrap_or("");
                             let guild_id = d_content["guild_id"].as_str().unwrap_or("");
 
@@ -299,11 +307,12 @@ pub async fn gateway_connect() -> Result<()> {
                             }
 
                             if content.starts_with("!askleo join") {
+                                let voice_channel = users_to_channels.get(&author_id);
                                 let join_json = serde_json::json!({
                                   "op": 4,
                                   "d": {
                                     "guild_id": guild_id,
-                                    "channel_id": channel_id,
+                                    "channel_id": voice_channel,
                                     "self_mute": false,
                                     "self_deaf": false
                                   }
@@ -332,6 +341,7 @@ pub async fn gateway_connect() -> Result<()> {
                             }
 
                             if content.starts_with("!askleo randomleo") {
+                                // Change when I have more pictures
                                 println!("Random Picture of Leo asked for");
                                 let client = DiscordHTTP::new();
                                 match DiscordHTTP::send_message_form(
