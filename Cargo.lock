@@ -201,6 +201,7 @@ dependencies = [
  "tokio",
  "tokio-sync",
  "tokio-tungstenite",
+ "url",
 ]
 
 [[package]]
