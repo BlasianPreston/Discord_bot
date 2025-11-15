@@ -6,6 +6,14 @@ use serde_json::{Value, json};
 use tokio::select;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn current_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+}
 
 // Create join voice gateway function
 async fn connect_to_voice_server(
@@ -32,16 +40,7 @@ async fn connect_to_voice_server(
 
     let (tx_outbound, mut rx_outbound) = mpsc::channel::<String>(32);
     let (seq_tx, seq_rx) = tokio::sync::watch::channel(None::<u64>);
-
-    let identify_payload = json!({
-        "op": 0,
-        "d": {
-            "server_id": guild_id,
-            "user_id": user_id,
-            "session_id": session_id,
-            "token": token
-        }
-    });
+    let (speaking_tx, speaking_rx) = tokio::sync::watch::channel(None::<u64>);
 
     let tx_outbound_clone = tx_outbound.clone();
     let seq_rx_clone = seq_rx.clone();
@@ -98,6 +97,10 @@ async fn connect_to_voice_server(
                                 // Store those two values alongside ssrc
                                 // Use ssrc when sending voice packets
 
+                                if let Some(s) = data["ssrc"].as_u64() {
+                                    let _ = speaking_tx.send(Some(s));
+                                }
+
                                 let select_protocol = json!({
                                     "op": 1,
                                     "d": {
@@ -113,16 +116,28 @@ async fn connect_to_voice_server(
                                 let _ = tx_outbound.send(select_protocol.to_string());
                             }
 
-                            Some(4) => {
+                            Some(4) => { // Session Description
                                 let data = &json["d"]["data"];
-                                let secret_key = &json["secret_key"];
+                                let secret_key = &data["secret_key"]; // Use when sending voice packets
 
+                                let tx_heartbeat = tx_outbound_clone.clone();
+                                let mut speaking_rx_heartbeat = speaking_rx.clone();
                                 tokio::spawn(async move {
-                                    seq_rx_heartbeat.changed().await.unwrap();
+                                    speaking_rx_heartbeat.changed().await.unwrap();
                                     loop {
                                         tokio::time::sleep(Duration::from_millis(5000)).await;
+                                        let ssrc = *speaking_rx_heartbeat.borrow();
                                         let heartbeat =
-                                            serde_json::json!({ "op": 1, "d": seq_val }).to_string();
+                                            serde_json::json!(
+                                                {
+                                                "op": 5,
+                                                "d": {
+                                                    "speaking": 1,
+                                                    "delay": 0,
+                                                    "ssrc": ssrc
+                                                }
+                                            }
+                                            ).to_string();
                                         if tx_heartbeat.send(heartbeat).await.is_err() {
                                             eprintln!("Heartbeat channel closed.");
                                             break;
@@ -155,14 +170,12 @@ async fn connect_to_voice_server(
 
                                 // Spawn the heartbeat task after receiving the interval
                                 let tx_heartbeat = tx_outbound_clone.clone();
-                                let mut seq_rx_heartbeat = seq_rx_clone.clone();
                                 tokio::spawn(async move {
-                                    seq_rx_heartbeat.changed().await.unwrap();
                                     loop {
                                         tokio::time::sleep(Duration::from_millis(interval_ms)).await;
-                                        let seq_val = *seq_rx_heartbeat.borrow();
+                                        let nonce = current_millis();
                                         let heartbeat =
-                                            serde_json::json!({ "op": 3, "d": seq_val }).to_string();
+                                            serde_json::json!({ "op": 3, "d": nonce }).to_string();
                                         if tx_heartbeat.send(heartbeat).await.is_err() {
                                             eprintln!("Heartbeat channel closed.");
                                             break;
