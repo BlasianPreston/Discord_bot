@@ -15,25 +15,40 @@ impl DiscordHTTP {
         }
     }
 
-    pub async fn _send_message_text(
+    pub async fn send_message_text(
         client: Self,
         token: &str,
         channel_id: &str,
         content: &str,
-    ) -> Result<(), reqwest::Error> {
+    ) -> Result<()> {
         let url = format!(
             "https://discord.com/api/v10/channels/{}/messages",
             channel_id
         );
         let body = json!({ "content": content });
 
-        client
+        let response = client
             .client
             .post(&url)
-            .bearer_auth(token)
+            .header("Authorization", format!("Bot {}", token))
             .json(&body)
             .send()
-            .await?;
+            .await
+            .context("Failed to send HTTP request to Discord API")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            eprintln!("Discord API error: {} - {}", status, error_text);
+            anyhow::bail!(
+                "Discord API returned error status: {} - {}",
+                status,
+                error_text
+            );
+        }
 
         Ok(())
     }
