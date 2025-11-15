@@ -2,12 +2,18 @@ use super::https::DiscordHTTP;
 use anyhow::Result;
 use dotenv::dotenv;
 use futures_util::{SinkExt, stream::StreamExt};
+use rand::Rng;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::{env, time::Duration};
 use tokio::select;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+pub fn get_random_number(start: u64, end: u64) -> u64 {
+    let mut rng = rand::rng();
+    rng.random_range(start..=end)
+}
 
 pub async fn gateway_connect() -> Result<()> {
     let url = "wss://gateway.discord.gg/?v=10&encoding=json";
@@ -272,10 +278,13 @@ pub async fn gateway_connect() -> Result<()> {
                         Some("GUILD_CREATE") => {
                             if let Some(voice_states) = d_content["voice_states"].as_array() {
                                 for voice_state in voice_states {
-                                    let user_id = voice_state["user_id"].as_str().unwrap_or_default().to_string();
+                                    let user_id = voice_state["user_id"]
+                                        .as_str()
+                                        .unwrap_or_default()
+                                        .to_string();
                                     let channel_id = match voice_state["channel_id"].as_str() {
                                         Some(id) => Some(id.to_string()),
-                                        None => None
+                                        None => None,
                                     };
                                     users_to_channels.insert(user_id, channel_id);
                                 }
@@ -285,7 +294,7 @@ pub async fn gateway_connect() -> Result<()> {
                         Some("VOICE_STATE_UPDATE") => {
                             let channel_id = match d_content["channel_id"].as_str() {
                                 Some(id) => Some(id.to_string()),
-                                None => None
+                                None => None,
                             };
                             let user_id = d_content["user_id"].as_str().unwrap_or("").to_string();
                             users_to_channels.insert(user_id, channel_id);
@@ -295,9 +304,11 @@ pub async fn gateway_connect() -> Result<()> {
                             let bot_id = env::var("DISCORD_APP_ID")
                                 .expect("DISCORD_APP_ID not set")
                                 .parse()
-                                .unwrap_or(0).to_string();
+                                .unwrap_or(0)
+                                .to_string();
                             let content = d_content["content"].as_str().unwrap_or("");
-                            let author_id = d_content["author"]["id"].as_str().unwrap_or("").to_string();
+                            let author_id =
+                                d_content["author"]["id"].as_str().unwrap_or("").to_string();
                             let channel_id = d_content["channel_id"].as_str().unwrap_or("");
                             let guild_id = d_content["guild_id"].as_str().unwrap_or("");
 
@@ -344,12 +355,13 @@ pub async fn gateway_connect() -> Result<()> {
                                 // Change when I have more pictures
                                 println!("Random Picture of Leo asked for");
                                 let client = DiscordHTTP::new();
+                                let image_num = get_random_number(1, 21);
                                 match DiscordHTTP::send_message_form(
                                     client,
                                     &token,
                                     channel_id,
                                     "Here is an image of Leo",
-                                    "images/leo_slander.jpg",
+                                    format!("images/leo_{}.jpg", image_num).as_str(),
                                 )
                                 .await
                                 {
